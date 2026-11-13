@@ -1,0 +1,11 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+pydantic-settings==2.8.1
+SQLAlchemy==2.0.40
+PyMySQL==1.1.1
+APScheduler==3.11.0
+pandas==2.2.3
+akshare==1.17.32
+exchange-calendars==4.10.1
+httpx==0.28.1
+pytest==8.3.5

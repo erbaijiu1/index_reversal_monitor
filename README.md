@@ -31,7 +31,8 @@ pytest -q
 本项目只新增业务文件，严格以宿主 `/data/toc_service/README.md` 为基础设施规范。
 
 1. 项目放在 `/data/toc_service/index_reversal_monitor/`。
-2. 创建独立 MySQL schema `db_index_reversal`、最小权限用户；建表使用 `sql/schema.sql`。**不要在生产环境同时执行已有 schema SQL 和 ORM 自动迁移**，后续表改动用显式迁移。
+2. 创建独立 MySQL schema `db_index_reversal`、最小权限用户；先执行 `sql/schema.sql`，再执行 `sql/backtest.sql`。**不要在生产环境同时执行已有 schema SQL 和 ORM 自动迁移**，后续表改动用显式迁移。
+   如果数据库已安装过早期回测草稿表，则不要重复执行 `backtest.sql`，改为执行一次 `sql/backtest_v1_1_migration.sql`。
 3. 新建 `/data/toc_service/env/index_reversal.env`，参照 `backend/.env.example`，权限 `chmod 600`。
 4. **将 `deploy/docker-compose.yml` 复制到项目根目录**作为业务子 Compose（它的相对路径以项目根目录为准）。主 Compose `include:` 只新增 `./index_reversal_monitor/docker-compose.yml`。
 5. 将 `deploy/index-reversal.conf` 复制到 `/data/toc_service/nginx/locations/index-reversal.conf`，检查共享 Nginx 的 `/usr/share/nginx/html` 是否正确挂载根目录 `dist/`。
@@ -52,6 +53,9 @@ pytest -q
 ## 主要端点
 
 - `GET /index-reversal/api/v1/indices`、`GET /overview`、`GET /signals`
+- `POST /index-reversal/api/v1/backtest/runs` 创建异步指数回测，`GET /backtest/runs/{id}` 查询状态
+- `GET /index-reversal/api/v1/backtest/runs/{id}/equity|trades|orders` 查询净值、交易和成交明细
+- `GET /index-reversal/api/v1/backtest/compare?run_ids=1&run_ids=2` 对比回测任务
 - `GET /indices/{id}/candles?period=1w`、`GET /indices/{id}/signals`
 - 管理（Header: `X-Admin-Token`）：`POST /indices`、`PATCH /indices/{id}`、`POST /indices/{id}/probe`、`POST /jobs/backfill`、`POST /jobs/scan`、`PUT /config`
 - 文档：`/index-reversal/api/docs`
@@ -62,3 +66,11 @@ pytest -q
 - 港股接口可能没有成交量，届时只输出价格形态并标记 `UNAVAILABLE`，不能虚构量能。
 - 没有提供实际企业微信机器人 URL，因此通知模块只提供通用 webhook。
 - V1 为完整可运行的初版工程，不等于已完成生产环境验收。见 `docs/DESIGN.md` 的验收清单。
+
+## 行情稳定同步策略
+
+- 调度器每天执行一次30天重叠窗口的增量同步；重复日期按唯一键更新，因此可安全重跑，也能补齐数据源延迟发布或短暂漏掉的行情。
+- 数据源请求默认指数退避重试3次；单个指数失败只记录该指数错误，不回滚其他指数的成功结果，也不删除既有行情。
+- 周K在交易日历覆盖范围内严格按交易所日历判断完整性；超出日历包的未来覆盖范围时，以官方行情实际返回日期为准，且当前周始终保持未完成。
+- 沪深300和中证500使用 `akshare_csindex`，量能口径为 `VOLUME`。该官方源可能延迟约1至2个交易日，系统通过每日重叠同步自动追补，不与其他来源拼接同一根K线。
+- 指数管理页支持单指数探测、五年补采、历史扫描和启停，并显示日线、周线、信号数量及最后数据日。

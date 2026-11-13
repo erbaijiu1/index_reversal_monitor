@@ -1,0 +1,35 @@
+# Place project at /data/toc_service/index_reversal_monitor and include in root compose.
+services:
+  index_reversal_backend:
+    build:
+      context: ./backend
+    image: index-reversal-backend:1.0
+    container_name: index_reversal_backend
+    restart: unless-stopped
+    networks: [web]
+    env_file: /data/toc_service/env/index_reversal.env
+    environment:
+      SCHEDULE_ENABLED: "false"
+    volumes:
+      - ./backend/app:/app/app:ro
+    command: ["uvicorn","app.main:app","--host","0.0.0.0","--port","8096"]
+  index_reversal_scheduler:
+    image: index-reversal-backend:1.0
+    container_name: index_reversal_scheduler
+    restart: unless-stopped
+    networks: [web]
+    env_file: /data/toc_service/env/index_reversal.env
+    environment:
+      SCHEDULE_ENABLED: "true"
+    volumes:
+      - ./backend/app:/app/app:ro
+    command: ["python","-m","app.jobs.scheduler"]
+  index_reversal_backtest_worker:
+    image: index-reversal-backend:1.0
+    container_name: index_reversal_backtest_worker
+    restart: unless-stopped
+    networks: [web]
+    env_file: /data/toc_service/env/index_reversal.env
+    volumes:
+      - ./backend/app:/app/app:ro
+    command: ["python","-m","app.jobs.backtest_runner"]

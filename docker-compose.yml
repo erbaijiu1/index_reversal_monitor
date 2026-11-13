@@ -1,0 +1,36 @@
+# Local development plugin for /Users/hc/Desktop/code/local_dev_env.
+# The shared MySQL and Nginx services are owned by local_dev_env.
+services:
+  index_reversal_backend:
+    build:
+      context: ./backend
+    image: index-reversal-backend:py310
+    container_name: index_reversal_backend
+    restart: unless-stopped
+    networks: [web]
+    env_file: ./backend/.env
+    environment:
+      SCHEDULE_ENABLED: "false"
+    volumes:
+      - ./backend/app:/app/app:ro
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8096"]
+  index_reversal_scheduler:
+    image: index-reversal-backend:py310
+    container_name: index_reversal_scheduler
+    restart: unless-stopped
+    networks: [web]
+    env_file: ./backend/.env
+    environment:
+      SCHEDULE_ENABLED: "true"
+    volumes:
+      - ./backend/app:/app/app:ro
+    command: ["python", "-m", "app.jobs.scheduler"]
+  index_reversal_backtest_worker:
+    image: index-reversal-backend:py310
+    container_name: index_reversal_backtest_worker
+    restart: unless-stopped
+    networks: [web]
+    env_file: ./backend/.env
+    volumes:
+      - ./backend/app:/app/app:ro
+    command: ["python", "-m", "app.jobs.backtest_runner"]
