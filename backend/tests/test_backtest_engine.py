@@ -71,3 +71,79 @@ def test_invalid_ohlc_is_rejected():
         assert "OHLC" in str(error)
     else:
         raise AssertionError("invalid OHLC was accepted")
+
+
+def test_signal_close_entry_uses_close_and_buffered_signal_low():
+    bars = [
+        Bar(d(8), 98, 101, 97, 100),
+        Bar(d(9), 101, 103, 100, 102),
+    ]
+    result = run_backtest(
+        bars, [SignalPoint(5, d(8), d(8), 95)], "A", 100_000,
+        fee_ratio=0, slippage_ratio=0, max_position_ratio=1,
+        entry_timing="SIGNAL_CLOSE", stop_buffer_ratio=0.01,
+    )
+
+    trade = result["trades"][0]
+    assert trade.entry_date == d(8)
+    assert trade.entry_price == 100
+    assert isclose(trade.initial_stop, 94.05)
+    assert result["orders"][0].reason == "SIGNAL_CLOSE"
+
+
+def test_stop_buffer_is_included_in_max_stop_filter():
+    bars = [Bar(d(8), 98, 101, 97, 100), Bar(d(9), 100, 101, 99, 100)]
+    result = run_backtest(
+        bars, [SignalPoint(6, d(8), d(8), 95)], "A", 100_000,
+        fee_ratio=0, slippage_ratio=0, entry_timing="SIGNAL_CLOSE",
+        stop_buffer_ratio=0.10, max_stop_ratio=0.08,
+    )
+
+    assert result["trades"] == []
+    assert result["skipped"][0]["reason"] == "STOP_DISTANCE_EXCEEDED"
+
+
+def test_strategy_d_exits_next_open_after_signal_close_invalidation():
+    bars = [
+        Bar(d(8), 100, 101, 99, 100),
+        Bar(d(9), 100, 101, 94, 94.5),
+        Bar(d(10), 94, 96, 93, 95),
+    ]
+    result = run_backtest(
+        bars, [SignalPoint(7, d(1), d(5), 95)], "D", 100_000,
+        fee_ratio=0, slippage_ratio=0, stop_buffer_ratio=0.05,
+        max_stop_ratio=0.12, signal_period="1d",
+    )
+
+    trade = result["trades"][0]
+    assert trade.exit_date == d(10)
+    assert trade.exit_price == 94
+    assert trade.exit_reason == "SIGNAL_INVALIDATED_CLOSE"
+
+
+def test_strategy_d_takes_quarter_at_2r_then_uses_weekly_close_exit():
+    jan = lambda day: date(2024, 1, day)
+    feb = lambda day: date(2024, 2, day)
+    bars = [
+        Bar(jan(8), 100, 101, 99, 100),
+        Bar(jan(9), 101, 111, 100.5, 109),
+        Bar(jan(12), 109, 110, 102, 108),
+        Bar(jan(19), 108, 112, 105, 110),
+        Bar(jan(26), 110, 113, 108, 111),
+        Bar(feb(2), 110, 111, 101, 101),
+        Bar(feb(5), 100.5, 102, 100.2, 101),
+    ]
+    result = run_backtest(
+        bars, [SignalPoint(8, jan(1), jan(5), 95)], "D", 100_000,
+        fee_ratio=0, slippage_ratio=0, signal_period="1w",
+        completed_week_lows=[
+            (jan(12), 102), (jan(19), 105), (jan(26), 108), (feb(2), 101),
+        ],
+    )
+
+    assert [order.reason for order in result["orders"]] == [
+        "SIGNAL_NEXT_OPEN", "TAKE_2R_QUARTER", "WEEKLY_TREND_EXIT",
+    ]
+    assert result["orders"][1].quantity == 50
+    assert result["orders"][2].quantity == 150
+    assert result["trades"][0].exit_date == feb(5)

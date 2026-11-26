@@ -58,8 +58,7 @@ CREATE TABLE IF NOT EXISTS t_backtest_trade (
   status VARCHAR(16) NOT NULL DEFAULT 'OPEN',
   PRIMARY KEY (id),
   KEY idx_backtest_trade_run (run_id),
-  CONSTRAINT fk_backtest_trade_run FOREIGN KEY (run_id) REFERENCES t_backtest_run(id),
-  CONSTRAINT fk_backtest_trade_signal FOREIGN KEY (signal_id) REFERENCES t_index_reversal_signal(id)
+  CONSTRAINT fk_backtest_trade_run FOREIGN KEY (run_id) REFERENCES t_backtest_run(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS t_backtest_equity (

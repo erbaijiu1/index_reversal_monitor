@@ -1,6 +1,6 @@
 """AKShare index data adapters."""
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import time
 import pandas as pd
 
@@ -49,12 +49,21 @@ def fetch(provider: str, symbol: str, start: date, end: date, attempts: int = 3)
 
     df["date"] = pd.to_datetime(df["date"]).dt.date
     rows = []
+    def decimal_or_none(raw):
+        if raw is None or pd.isna(raw):
+            return None
+        text = str(raw).strip().replace(",", "")
+        if text.lower() in ("", "-", "--", "none", "nan", "null"):
+            return None
+        try:
+            return Decimal(text)
+        except InvalidOperation:
+            return None
     for _, row_data in df.iterrows():
         if not start <= row_data["date"] <= end:
             continue
         row = {"date": row_data["date"]}
         for key in ("open", "high", "low", "close", "volume", "amount"):
-            raw = row_data.get(key)
-            row[key] = None if raw is None or pd.isna(raw) or str(raw).strip() in ("", "-") else Decimal(str(raw).replace(",", ""))
+            row[key] = decimal_or_none(row_data.get(key))
         rows.append(row)
     return sorted(rows, key=lambda item: item["date"])

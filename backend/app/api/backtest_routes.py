@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..backtest.models import BacktestEquity, BacktestOrder, BacktestRun, BacktestTrade
 from ..core.config import settings
 from ..core.db import get_db
-from ..core.models import Daily, Index, Signal, Weekly
+from ..core.models import Daily, Index, MonitorConfig, Signal, Weekly
 from ..jobs.backtest_runner import execute_backtest
 
 router = APIRouter(prefix="/index-reversal/api/v1/backtest", tags=["backtest"])
@@ -21,7 +21,11 @@ def auth(x_admin_token: str | None = Header(None)):
 
 class BacktestRequest(BaseModel):
     index_id: int
-    strategy: str = Field("A", pattern="^[ABC]$")
+    strategy: str = Field("A", pattern="^[ABCD]$")
+    signal_mode: str = Field("ENGULFING", pattern="^(ENGULFING|BREAKOUT_PULLBACK)$")
+    signal_period: str = Field("1w", pattern="^(1d|1w)$")
+    entry_timing: str = Field("NEXT_OPEN", pattern="^(NEXT_OPEN|SIGNAL_CLOSE)$")
+    stop_buffer_ratio: float = Field(0.0, ge=0, le=0.5)
     start_date: date
     end_date: date
     initial_capital: float = Field(100000, gt=0)
@@ -43,7 +47,9 @@ def _run_dict(run: BacktestRun):
         "id": run.id, "index_id": run.index_id, "strategy": run.strategy,
         "execution_mode": run.execution_mode, "start_date": run.start_date,
         "end_date": run.end_date, "initial_capital": float(run.initial_capital),
-        "parameters": run.parameters, "signal_algorithm_version": run.signal_algorithm_version,
+        "parameters": run.parameters, "signal_period": (run.parameters or {}).get("signal_period", "1w"),
+        "signal_mode": (run.parameters or {}).get("signal_mode", "ENGULFING"),
+        "signal_algorithm_version": run.signal_algorithm_version,
         "data_version": run.data_version, "status": run.status, "summary": run.summary,
         "error_message": run.error_message, "created_at": run.created_at,
         "finished_at": run.finished_at,
@@ -73,7 +79,30 @@ def create_run(p: BacktestRequest, background_tasks: BackgroundTasks, db: Sessio
         raise HTTPException(404, "index not found")
     if p.end_date <= p.start_date:
         raise HTTPException(400, "end_date must be after start_date")
+    if p.signal_mode == "BREAKOUT_PULLBACK" and p.signal_period != "1d":
+        raise HTTPException(400, "breakout pullback signals require daily signal period")
     parameters = {key: _json(value) for key, value in p.model_dump().items()}
+    if p.signal_mode == "BREAKOUT_PULLBACK":
+        parameters["breakout_pullback_rule"] = {
+            "breakout_lookback": 20, "bottom_lookback": 60,
+            "bottom_max_distance": 0.05, "breakout_level_tolerance": 0.005,
+            "min_volume_ratio": 1.8, "min_body_ratio": 0.03,
+            "min_body_to_range": 0.60,
+            "min_close_location": 0.80, "max_pullback_days": 5,
+            "pullback_level_tolerance": 0.01,
+            "pullback_max_above_breakout_close": 0.03,
+            "pullback_max_body_ratio": 0.01,
+        }
+    elif p.signal_period == "1d":
+        config = db.scalar(select(MonitorConfig).where(MonitorConfig.enabled.is_(True)).order_by(MonitorConfig.id))
+        parameters["signal_rule"] = {
+            "min_engulfed": config.min_engulfed_count if config else 2,
+            "min_bearish": config.min_bearish_count if config else 2,
+            "max_lookback": config.max_lookback_weeks if config else 26,
+            "volume_lookback": config.volume_lookback_weeks if config else 5,
+            "volume_warm": float(config.volume_warm_ratio) if config else 1.2,
+            "volume_strong": float(config.volume_strong_ratio) if config else 1.5,
+        }
     run = BacktestRun(
         index_id=p.index_id, strategy=p.strategy, execution_mode="INDEX_THEORETICAL",
         start_date=p.start_date, end_date=p.end_date, initial_capital=p.initial_capital,
@@ -148,9 +177,13 @@ def get_candles(run_id: int, period: str = "1d", db: Session = Depends(get_db)):
 
 @router.get("/runs/{run_id}/trades")
 def get_trades(run_id: int, db: Session = Depends(get_db)):
-    _require_run(db, run_id)
+    run = _require_run(db, run_id)
+    period = (run.parameters or {}).get("signal_period", "1w")
+    rows = db.scalars(select(BacktestTrade).where(BacktestTrade.run_id == run_id).order_by(BacktestTrade.entry_date)).all()
+    signal_dates = _signal_dates(db, run, {x.signal_id for x in rows})
     return [{
         "id": x.id, "signal_id": x.signal_id, "entry_date": x.entry_date,
+        "signal_date": signal_dates.get(x.signal_id), "signal_period": period,
         "exit_date": x.exit_date, "entry_price": float(x.entry_price),
         "exit_price": float(x.exit_price) if x.exit_price is not None else None,
         "quantity": float(x.quantity), "initial_stop": float(x.initial_stop),
@@ -159,20 +192,30 @@ def get_trades(run_id: int, db: Session = Depends(get_db)):
         "total_fee": float(x.total_fee), "total_slippage": float(x.total_slippage),
         "return_ratio": float(x.return_ratio) if x.return_ratio is not None else None,
         "status": x.status,
-    } for x in db.scalars(select(BacktestTrade).where(BacktestTrade.run_id == run_id).order_by(BacktestTrade.entry_date))]
+    } for x in rows]
+
+
+def _signal_dates(db: Session, run: BacktestRun, signal_ids: set[int]) -> dict[int, date]:
+    if not signal_ids:
+        return {}
+    if (run.parameters or {}).get("signal_period", "1w") == "1d":
+        return dict(db.execute(select(Daily.id, Daily.trade_date).where(Daily.index_id == run.index_id, Daily.id.in_(signal_ids))).all())
+    return dict(db.execute(select(Signal.id, Signal.week_start).where(Signal.id.in_(signal_ids))).all())
 
 
 @router.get("/runs/{run_id}/orders")
 def get_orders(run_id: int, db: Session = Depends(get_db)):
-    _require_run(db, run_id)
+    run = _require_run(db, run_id)
     orders = db.scalars(
         select(BacktestOrder).where(BacktestOrder.run_id == run_id).order_by(BacktestOrder.trade_date, BacktestOrder.id)
     ).all()
     signal_ids = {x.signal_id for x in orders}
-    signal_weeks = dict(db.execute(select(Signal.id, Signal.week_start).where(Signal.id.in_(signal_ids))).all()) if signal_ids else {}
+    signal_dates = _signal_dates(db, run, signal_ids)
+    period = (run.parameters or {}).get("signal_period", "1w")
     return [{
         "id": x.id, "trade_id": x.trade_id, "signal_id": x.signal_id,
-        "signal_week": signal_weeks.get(x.signal_id),
+        "signal_date": signal_dates.get(x.signal_id), "signal_period": period,
+        "signal_week": signal_dates.get(x.signal_id) if period == "1w" else None,
         "side": x.side, "order_type": x.order_type, "trade_date": x.trade_date,
         "trigger_price": float(x.trigger_price), "fill_price": float(x.fill_price),
         "quantity": float(x.quantity), "notional": float(x.notional),
@@ -186,26 +229,36 @@ def get_skipped(run_id: int, db: Session = Depends(get_db)):
     skipped = (run.summary or {}).get("skipped", [])
     signal_ids = {x.get("signal_id") for x in skipped if x.get("signal_id") is not None}
     trade_dates = {date.fromisoformat(x["trade_date"]) if isinstance(x.get("trade_date"), str) else x.get("trade_date") for x in skipped if x.get("trade_date")}
-    signals = {x.id: x for x in db.scalars(select(Signal).where(Signal.id.in_(signal_ids)))} if signal_ids else {}
+    period = (run.parameters or {}).get("signal_period", "1w")
+    signal_dates = _signal_dates(db, run, signal_ids)
+    signals = {x.id: x for x in db.scalars(select(Signal).where(Signal.id.in_(signal_ids)))} if signal_ids and period == "1w" else {}
     signal_weeks = {x.week_start for x in signals.values()}
     weeks = {(x.index_id, x.week_start): x for x in db.scalars(select(Weekly).where(Weekly.index_id == run.index_id, Weekly.week_start.in_(signal_weeks)))} if signal_weeks else {}
+    signal_days = {x.id: x for x in db.scalars(select(Daily).where(Daily.index_id == run.index_id, Daily.id.in_(signal_ids)))} if signal_ids and period == "1d" else {}
     daily = {x.trade_date: x for x in db.scalars(select(Daily).where(Daily.index_id == run.index_id, Daily.trade_date.in_(trade_dates)))} if trade_dates else {}
     slippage_ratio = float((run.parameters or {}).get("slippage_ratio", 0))
     max_stop_ratio = float((run.parameters or {}).get("max_stop_ratio", 0))
+    entry_timing = (run.parameters or {}).get("entry_timing", "NEXT_OPEN")
+    stop_buffer_ratio = float((run.parameters or {}).get("stop_buffer_ratio", 0))
     result = []
     for item in skipped:
         trade_date = date.fromisoformat(item["trade_date"]) if isinstance(item.get("trade_date"), str) else item.get("trade_date")
         signal = signals.get(item.get("signal_id"))
         week = weeks.get((run.index_id, signal.week_start)) if signal else None
+        signal_day = signal_days.get(item.get("signal_id"))
         bar = daily.get(trade_date)
-        planned_entry = float(bar.open_price) * (1 + slippage_ratio) if bar else None
-        initial_stop = float(week.low_price) if week else None
+        trigger_price = float(bar.close_price if entry_timing == "SIGNAL_CLOSE" else bar.open_price) if bar else None
+        planned_entry = trigger_price * (1 + slippage_ratio) if trigger_price else None
+        signal_low = float(signal_day.low_price) if signal_day else float(week.low_price) if week else None
+        initial_stop = signal_low * (1 - stop_buffer_ratio) if signal_low else None
         stop_ratio = (planned_entry - initial_stop) / planned_entry if planned_entry and initial_stop and planned_entry > initial_stop else None
         result.append({
             **item, "trade_date": trade_date,
+            "signal_date": signal_dates.get(item.get("signal_id")), "signal_period": period,
             "signal_week": signal.week_start if signal else None,
             "planned_entry_price": planned_entry, "initial_stop": initial_stop,
             "stop_ratio": stop_ratio, "max_stop_ratio": max_stop_ratio,
+            "entry_timing": entry_timing, "stop_buffer_ratio": stop_buffer_ratio,
         })
     return result
 

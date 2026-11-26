@@ -46,7 +46,9 @@ class BacktestTrade(Base):
     __tablename__ = "t_backtest_trade"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("t_backtest_run.id"))
-    signal_id: Mapped[int] = mapped_column(BIGINT(unsigned=True), ForeignKey("t_index_reversal_signal.id"))
+    # Weekly runs reference t_index_reversal_signal.id; daily-pattern runs
+    # reference t_index_daily.id. The run's signal_period selects the namespace.
+    signal_id: Mapped[int] = mapped_column(BIGINT(unsigned=True))
     entry_date: Mapped[date] = mapped_column(Date)
     exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     entry_price: Mapped[float] = mapped_column(Numeric(20, 6))

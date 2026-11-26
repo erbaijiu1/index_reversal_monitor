@@ -108,14 +108,22 @@ def run_backtest(
     max_stop_ratio: float = 0.08, fee_ratio: float = 0.0003,
     slippage_ratio: float = 0.0005, completed_week_lows: list[tuple[date, float]] | None = None,
     take_profit_r: float = 2.0, lot_size: int = 1,
+    entry_timing: str = "NEXT_OPEN", stop_buffer_ratio: float = 0.0,
+    signal_period: str = "1w",
 ) -> dict[str, Any]:
     """Run one-index account simulation without using future weekly data."""
-    if strategy not in {"A", "B", "C"}:
-        raise ValueError("strategy must be A, B or C")
+    if strategy not in {"A", "B", "C", "D"}:
+        raise ValueError("strategy must be A, B, C or D")
     if initial_capital <= 0 or not 0 < risk_ratio <= 1 or not 0 < max_position_ratio <= 1:
         raise ValueError("invalid capital or position parameters")
     if not 0 < max_stop_ratio <= 1 or min(fee_ratio, slippage_ratio) < 0 or lot_size < 1:
         raise ValueError("invalid execution parameters")
+    if entry_timing not in {"NEXT_OPEN", "SIGNAL_CLOSE"}:
+        raise ValueError("entry_timing must be NEXT_OPEN or SIGNAL_CLOSE")
+    if not 0 <= stop_buffer_ratio <= 0.5:
+        raise ValueError("stop_buffer_ratio must be between 0 and 0.5")
+    if signal_period not in {"1d", "1w"}:
+        raise ValueError("signal_period must be 1d or 1w")
 
     bars = sorted(bars, key=lambda x: x.trade_date)
     signals = sorted(signals, key=lambda x: (x.week_last_date, x.signal_id))
@@ -135,6 +143,10 @@ def run_backtest(
     stop = 0.0
     target: float | None = None
     signal_index = 0
+    raw_signal_low = 0.0
+    trend_active = False
+    pending_exit_reason: str | None = None
+    completed_week_dates = {week_end for week_end, _ in weekly_lows}
 
     def sell(bar: Bar, trigger: float, qty: float, order_type: str, reason: str) -> None:
         nonlocal cash, position
@@ -161,6 +173,10 @@ def run_backtest(
             position = None
 
     for bar_index, bar in enumerate(bars):
+        if position is not None and pending_exit_reason is not None:
+            sell(bar, bar.open, position.remaining_quantity, "EXIT", pending_exit_reason)
+            pending_exit_reason = None
+
         if position is not None and strategy in {"B", "C"}:
             eligible = [low for week_end, low in weekly_lows if week_end < bar.trade_date]
             if len(eligible) >= 2:
@@ -184,18 +200,37 @@ def run_backtest(
                 sell(bar, target, position.remaining_quantity / 2, "PARTIAL_TAKE_PROFIT", "TAKE_2R_HALF")
                 target = None
                 stop = max(stop, position.entry_price) if position else stop
+            elif strategy == "D" and target is not None and bar.open >= target:
+                sell(bar, bar.open, position.remaining_quantity / 4, "PARTIAL_TAKE_PROFIT", "TAKE_2R_QUARTER_GAP")
+                target = None
+                trend_active = position is not None
+                stop = max(stop, position.entry_price) if position else stop
+            elif strategy == "D" and target is not None and bar.high >= target:
+                sell(bar, target, position.remaining_quantity / 4, "PARTIAL_TAKE_PROFIT", "TAKE_2R_QUARTER")
+                target = None
+                trend_active = position is not None
+                stop = max(stop, position.entry_price) if position else stop
 
-        while signal_index < len(signals) and signals[signal_index].week_last_date < bar.trade_date:
+        signal_due = lambda point: (
+            point.week_last_date <= bar.trade_date
+            if entry_timing == "SIGNAL_CLOSE"
+            else point.week_last_date < bar.trade_date
+        )
+        while signal_index < len(signals) and signal_due(signals[signal_index]):
             point = signals[signal_index]
             signal_index += 1
-            # A signal is due only on the first available bar after confirmation.
-            if bar_index and bars[bar_index - 1].trade_date > point.week_last_date:
+            # A signal-close entry is due on its confirmation bar; next-open is
+            # due only on the first available bar after confirmation.
+            if entry_timing == "SIGNAL_CLOSE" and point.week_last_date < bar.trade_date:
+                continue
+            if entry_timing == "NEXT_OPEN" and bar_index and bars[bar_index - 1].trade_date > point.week_last_date:
                 continue
             if position is not None:
                 skipped.append({"signal_id": point.signal_id, "reason": "POSITION_ALREADY_OPEN", "trade_date": bar.trade_date})
                 continue
-            entry_fill = _slipped(bar.open, slippage_ratio, "BUY")
-            initial_stop = float(point.week_low)
+            entry_trigger = bar.close if entry_timing == "SIGNAL_CLOSE" else bar.open
+            entry_fill = _slipped(entry_trigger, slippage_ratio, "BUY")
+            initial_stop = float(point.week_low) * (1 - stop_buffer_ratio)
             if initial_stop <= 0 or entry_fill <= initial_stop:
                 skipped.append({"signal_id": point.signal_id, "reason": "INVALID_STOP", "trade_date": bar.trade_date})
                 continue
@@ -211,14 +246,27 @@ def run_backtest(
                 continue
             notional = quantity * entry_fill
             fee = notional * fee_ratio
-            slippage = quantity * max(entry_fill - bar.open, 0)
+            slippage = quantity * max(entry_fill - entry_trigger, 0)
             cash -= notional + fee
             position = SimTrade(point.signal_id, bar.trade_date, entry_fill, quantity, initial_stop, fee, slippage, quantity, total_fee=fee, total_slippage=slippage)
             trades.append(position)
             stop = initial_stop
+            raw_signal_low = float(point.week_low)
+            trend_active = False
+            pending_exit_reason = None
             target = entry_fill + take_profit_r * (entry_fill - initial_stop)
-            orders.append(SimOrder("BUY", "ENTRY", bar.trade_date, bar.open, entry_fill, quantity, notional, fee, slippage, "SIGNAL_NEXT_OPEN", point.signal_id))
+            entry_reason = "SIGNAL_CLOSE" if entry_timing == "SIGNAL_CLOSE" else "SIGNAL_NEXT_OPEN"
+            orders.append(SimOrder("BUY", "ENTRY", bar.trade_date, entry_trigger, entry_fill, quantity, notional, fee, slippage, entry_reason, point.signal_id))
             break
+
+        if position is not None and strategy == "D" and bar.trade_date > position.entry_date:
+            signal_period_closed = signal_period == "1d" or bar.trade_date in completed_week_dates
+            if not trend_active and signal_period_closed and bar.close < raw_signal_low:
+                pending_exit_reason = "SIGNAL_INVALIDATED_CLOSE"
+            elif trend_active and bar.trade_date in completed_week_dates:
+                prior_lows = [low for week_end, low in weekly_lows if week_end < bar.trade_date]
+                if len(prior_lows) >= 3 and bar.close < min(prior_lows[-3:]):
+                    pending_exit_reason = "WEEKLY_TREND_EXIT"
 
         if position is not None and bar_index == len(bars) - 1:
             sell(bar, bar.close, position.remaining_quantity, "EXIT", "END_OF_RANGE")

@@ -40,6 +40,8 @@ def _execute_backtest(run_id: int) -> bool:
                     p["risk_ratio"], p["max_position_ratio"], p["max_stop_ratio"],
                     p["fee_ratio"], p["slippage_ratio"], weekly_lows,
                     p.get("take_profit_r", 2.0), p.get("lot_size", 1),
+                    p.get("entry_timing", "NEXT_OPEN"), p.get("stop_buffer_ratio", 0.0),
+                    p.get("signal_period", "1w"),
                 )
                 run.data_version = data_version
                 run.signal_algorithm_version = algorithm_version

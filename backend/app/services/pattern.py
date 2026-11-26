@@ -1,6 +1,6 @@
 """Pure decimal-based engulfment detector. Input candles ordered oldest -> newest."""
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 D=lambda x: Decimal(str(x))
@@ -9,7 +9,7 @@ def valid(k):
     try:
         o,h,l,c=(D(k[x]) for x in ('open','high','low','close'))
         return l>0 and l<=min(o,c) and h>=max(o,c) and h>=l
-    except (KeyError, ValueError, TypeError): return False
+    except (KeyError, ValueError, TypeError, InvalidOperation): return False
 
 @dataclass(frozen=True)
 class Rule:
