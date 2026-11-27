@@ -11,7 +11,7 @@ from ..core.db import get_db
 from ..core.models import Daily, Index
 from .backtest import IndicatorPoint, MarketBar, run_allocation_backtest
 from .indicator import AllocationConfig
-from .models import MacroBacktestDaily, MacroBacktestRun, MacroIndicatorDaily, MacroRawDaily
+from .models import MacroBacktestDaily, MacroBacktestRun, MacroBacktestTrade, MacroIndicatorDaily, MacroRawDaily
 from .sync import fetch_upstream, sync_raw, calculate_indicators
 
 router = APIRouter(prefix="/index-reversal/api/v1/macro", tags=["macro-cap-gdp"])
@@ -114,9 +114,9 @@ def backtest(p: BacktestRequest, db: Session = Depends(get_db)):
     db.add(run)
     db.flush()
     for row in result["equity"]:
-        if row["x"] is None:
-            continue
         db.add(MacroBacktestDaily(run_id=run.id, **row))
+    for trade in result["trades"]:
+        db.add(MacroBacktestTrade(run_id=run.id, **trade))
     db.commit()
     return {"id": run.id, "summary": result["summary"], "trades": result["trades"],
             "provenance": provenances, "warning": "Exploratory backtest only: index prices are theoretical fills; history is not point-in-time audited."}
@@ -131,9 +131,19 @@ def backtests(db: Session = Depends(get_db)):
 def backtest_equity(run_id: int, db: Session = Depends(get_db)):
     if db.get(MacroBacktestRun, run_id) is None:
         raise HTTPException(404, "backtest not found")
-    return [{"date": r.trade_date, "x": float(r.x), "target_weight": float(r.target_weight),
+    return [{"date": r.trade_date, "x": float(r.x) if r.x is not None else None, "target_weight": float(r.target_weight),
              "actual_weight": float(r.actual_weight), "nav": float(r.nav),
              "benchmark_nav": float(r.benchmark_nav), "cash": float(r.cash), "holding": float(r.holding),
              "fee": float(r.fee), "action": r.action}
             for r in db.scalars(select(MacroBacktestDaily).where(
                 MacroBacktestDaily.run_id == run_id).order_by(MacroBacktestDaily.trade_date))]
+
+@router.get("/backtests/{run_id}/trades")
+def backtest_trades(run_id: int, db: Session = Depends(get_db)):
+    if db.get(MacroBacktestRun, run_id) is None:
+        raise HTTPException(404, "backtest not found")
+    return [{"signal_date": r.signal_date, "trade_date": r.trade_date,
+             "x": float(r.x), "side": r.side, "target_weight": float(r.target_weight),
+             "price": float(r.price), "quantity": float(r.quantity), "fee": float(r.fee)}
+            for r in db.scalars(select(MacroBacktestTrade).where(
+                MacroBacktestTrade.run_id == run_id).order_by(MacroBacktestTrade.trade_date, MacroBacktestTrade.id))]
