@@ -46,7 +46,7 @@ class MacroBacktestDaily(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("t_macro_backtest_run.id"))
     trade_date: Mapped[date] = mapped_column(Date)
-    x: Mapped[float] = mapped_column(Numeric(16, 8))
+    x: Mapped[float | None] = mapped_column(Numeric(16, 8), nullable=True)
     target_weight: Mapped[float] = mapped_column(Numeric(12, 8))
     actual_weight: Mapped[float] = mapped_column(Numeric(12, 8))
     cash: Mapped[float] = mapped_column(Numeric(22, 6))
@@ -55,3 +55,16 @@ class MacroBacktestDaily(Base):
     benchmark_nav: Mapped[float] = mapped_column(Numeric(22, 6))
     fee: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
     action: Mapped[str] = mapped_column(String(20), default="HOLD")
+
+class MacroBacktestTrade(Base):
+    __tablename__ = "t_macro_backtest_trade"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("t_macro_backtest_run.id"))
+    signal_date: Mapped[date] = mapped_column(Date)
+    trade_date: Mapped[date] = mapped_column(Date)
+    x: Mapped[float] = mapped_column(Numeric(16, 8))
+    side: Mapped[str] = mapped_column(String(8))
+    target_weight: Mapped[float] = mapped_column(Numeric(12, 8))
+    price: Mapped[float] = mapped_column(Numeric(20, 6))
+    quantity: Mapped[float] = mapped_column(Numeric(24, 8))
+    fee: Mapped[float] = mapped_column(Numeric(20, 6))
