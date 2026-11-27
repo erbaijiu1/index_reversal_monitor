@@ -9,11 +9,14 @@ from .backtest import models as backtest_models
 from .price_center.routes import router as price_center_router
 from .price_center.data import seed_etf_mappings
 from .price_center import models as price_center_models
+from .macro.routes import router as macro_router
+from .macro import models as macro_models
 
 app=FastAPI(title='Index Reversal Monitor',docs_url='/index-reversal/api/docs',openapi_url='/index-reversal/api/openapi.json')
 app.include_router(router)
 app.include_router(backtest_router)
 app.include_router(price_center_router)
+app.include_router(macro_router)
 @app.on_event('startup')
 def bootstrap():
     # Production schema should be installed through sql/schema.sql. create_all is safe for fresh DB only.
