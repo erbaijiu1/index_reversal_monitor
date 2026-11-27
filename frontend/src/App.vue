@@ -20,6 +20,72 @@ const pcChartEl = ref(null), pcEquityChartEl = ref(null)
 let chart = null, detailChart = null, pcChart = null, pcEquityChart = null, pollTimer = null
 const form = ref({ index_id: '', strategy: 'ALL', signal_mode: 'ENGULFING', signal_period: '1w', entry_timing: 'NEXT_OPEN', stop_buffer_percent: 1, start_date: '2020-11-13', end_date: '2026-11-12', initial_capital: 100000, risk_ratio: 0.01, max_position_ratio: 0.2, max_stop_ratio: 0.08, fee_ratio: 0.0003, slippage_ratio: 0.0005, take_profit_r: 2 })
 const pcForm = ref({ index_id: '', scenario_name: '', reference_method: 'SMA', ma_period: 36, trend_fit_lag_years: 1, start_date: '2005-01-01', end_date: '2026-11-25', initial_capital: 1000000, buy_tiers: [{ deviation_percent: -10, target_weight_percent: 50 }, { deviation_percent: -20, target_weight_percent: 80 }, { deviation_percent: -30, target_weight_percent: 100 }], sell_tiers: [{ deviation_percent: 20, target_weight_percent: 50 }, { deviation_percent: 40, target_weight_percent: 0 }], fee_ratio: 0.0003, slippage_ratio: 0.0005 })
+const macroForm = ref({ index_id: '', start_date: '2016-01-01', end_date: '2026-11-27', initial_capital: 1000000, allow_unverified_history: true })
+const macroIndicators = ref([]), macroRuns = ref([]), macroRun = ref(null), macroTrades = ref([]), macroEquity = ref([])
+const macroChartEl = ref(null)
+let macroChart = null
+async function loadMacro() {
+  const [indicators, history] = await Promise.all([request('/macro/indicators'), request('/macro/backtests')])
+  macroIndicators.value = indicators; macroRuns.value = history
+  if (!indices.value.length) await load()
+  if (!macroForm.value.index_id && indices.value.length) macroForm.value.index_id = indices.value.find(x => x.index_code === '000300')?.id || indices.value[0].id
+}
+async function macroSync() {
+  if (!auth()) return
+  busy.value = true; error.value = ''
+  try {
+    await request('/macro/sync', { method: 'POST', body: JSON.stringify({ start_date: macroForm.value.start_date, end_date: macroForm.value.end_date, market: 'CN-A' }) })
+    await request('/macro/indicators/recalculate', { method: 'POST' })
+    await loadMacro()
+  } catch (e) { error.value = e.message } finally { busy.value = false }
+}
+async function macroRecalculate() {
+  if (!auth()) return
+  busy.value = true; error.value = ''
+  try {
+    await request('/macro/indicators/recalculate', { method: 'POST' })
+    await loadMacro()
+  } catch (e) { error.value = e.message } finally { busy.value = false }
+}
+async function macroBacktest() {
+  if (!auth()) return
+  busy.value = true; error.value = ''
+  try {
+    const result = await request('/macro/backtests', { method: 'POST', body: JSON.stringify({ ...macroForm.value, index_id: Number(macroForm.value.index_id) }) })
+    await showMacroRun(result.id)
+    await loadMacro()
+  } catch (e) { error.value = e.message } finally { busy.value = false }
+}
+async function showMacroRun(id) {
+  busy.value = true; error.value = ''
+  try {
+    const run = macroRuns.value.find(x => x.id === id) || (await request('/macro/backtests')).find(x => x.id === id)
+    macroRun.value = run
+    ;[macroEquity.value, macroTrades.value] = await Promise.all([
+      request(`/macro/backtests/${id}/equity`), request(`/macro/backtests/${id}/trades`)
+    ])
+    page.value = 'macro_result'
+    await nextTick()
+    macroChart?.dispose()
+    if (macroChartEl.value && macroEquity.value.length) {
+      macroChart = echarts.init(macroChartEl.value)
+      macroChart.setOption({
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['CAP/GDP策略', '指数买入持有', '目标仓位'] },
+        grid: { left: 70, right: 70, top: 45, bottom: 55 },
+        xAxis: { type: 'category', data: macroEquity.value.map(r => r.date) },
+        yAxis: [{ type: 'value', scale: true }, { type: 'value', min: 0, max: 1 }],
+        dataZoom: [{ type: 'inside' }, { type: 'slider', bottom: 5 }],
+        series: [
+          { name: 'CAP/GDP策略', type: 'line', showSymbol: false, data: macroEquity.value.map(r => r.nav) },
+          { name: '指数买入持有', type: 'line', showSymbol: false, data: macroEquity.value.map(r => r.benchmark_nav) },
+          { name: '目标仓位', type: 'line', yAxisIndex: 1, showSymbol: false, data: macroEquity.value.map(r => r.target_weight) }
+        ]
+      })
+    }
+  } catch (e) { error.value = e.message } finally { busy.value = false }
+}
+
 const strategies = { A: 'A：2R 全部止盈', B: 'B：2R 减半 + 移动止损', C: 'C：全程移动止损', D: 'D：失败快退 + 2R减25% + 周收盘趋势退出' }
 const summary = computed(() => selectedRun.value?.summary || {})
 const selectedRunIndex = computed(() => indices.value.find(item => item.id === selectedRun.value?.index_id))
@@ -58,7 +124,7 @@ async function loadPriceCenter() {
 }
 async function nav(name) {
   page.value = name; error.value = ''
-  try { if (['overview', 'indices', 'signals', 'config', 'jobs', 'backtest'].includes(name)) await load(); if (name === 'runs') { await load(); await loadRuns() }; if (name === 'price_center') await loadPriceCenter() } catch (e) { error.value = e.message }
+  try { if (['overview', 'indices', 'signals', 'config', 'jobs', 'backtest'].includes(name)) await load(); if (name === 'runs') { await load(); await loadRuns() }; if (name === 'price_center') await loadPriceCenter(); if (name === 'macro') await loadMacro() } catch (e) { error.value = e.message }
 }
 async function runAdmin(path, payload = {}) {
   if (!auth()) return
@@ -257,11 +323,38 @@ onBeforeUnmount(() => { clearTimeout(pollTimer); chart?.dispose(); detailChart?.
 
 <template>
   <div class="layout">
-    <aside><h2>📈 指数反转监控</h2><p class="hint">量价形态 · 日/周线研究</p><button v-for="item in [['overview','监控总览'],['indices','指数管理'],['signals','历史信号'],['config','规则配置'],['jobs','任务记录'],['backtest','交易策略回测'],['runs','回测任务与结果'],['price_center','长期价格中枢']]" :key="item[0]" :class="{active: page === item[0] || (item[0] === 'indices' && page === 'detail') || (item[0] === 'runs' && page === 'result') || (item[0] === 'price_center' && page === 'price_center_result')}" @click="nav(item[0])">{{ item[1] }}</button></aside>
+    <aside><h2>📈 指数反转监控</h2><p class="hint">量价形态 · 日/周线研究</p><button v-for="item in [['overview','监控总览'],['indices','指数管理'],['signals','历史信号'],['config','规则配置'],['jobs','任务记录'],['backtest','交易策略回测'],['runs','回测任务与结果'],['price_center','长期价格中枢'],['macro','CAP/GDP宏观估值']]" :key="item[0]" :class="{active: page === item[0] || (item[0] === 'indices' && page === 'detail') || (item[0] === 'runs' && page === 'result') || (item[0] === 'price_center' && page === 'price_center_result')}" @click="nav(item[0])">{{ item[1] }}</button></aside>
     <main>
-      <header><h1>{{ ({ overview: '监控总览', indices: '指数管理', detail: selectedIndex?.index_name || 'K线详情', signals: '历史信号', config: '规则配置', jobs: '任务记录', backtest: '交易策略回测', runs: '回测任务', result: '回测结果分析', price_center: '长期价格中枢策略', price_center_result: '价格中枢回测结果' })[page] }}</h1><span class="hint">{{ busy ? '正在加载…' : '仅用于市场研究，不构成交易建议' }}</span></header>
+      <header><h1>{{ ({ overview: '监控总览', indices: '指数管理', detail: selectedIndex?.index_name || 'K线详情', signals: '历史信号', config: '规则配置', jobs: '任务记录', backtest: '交易策略回测', runs: '回测任务', result: '回测结果分析', price_center: '长期价格中枢策略', price_center_result: '价格中枢回测结果', macro: '总市值/GDP策略', macro_result: '宏观仓位回测结果' })[page] }}</h1><span class="hint">{{ busy ? '正在加载…' : '仅用于市场研究，不构成交易建议' }}</span></header>
       <div v-if="error" class="error">{{ error }}</div>
 
+      <section v-if="page === 'macro'">
+        <h3>宏观估值指标 · 数据同步 / 指标计算 / 回测分离</h3>
+        <p class="hint">使用全A总市值÷上一年度GDP配置沪深300等指数仓位。历史GDP未验证实际公布时点，回测属于探索性研究，执行价格是指数理论价格，不代表ETF实盘收益。</p>
+        <div class="form wide">
+          <div class="two"><label>交易指数<select v-model.number="macroForm.index_id"><option v-for="item in indices" :key="item.id" :value="item.id">{{ item.index_name }}（{{ item.index_code }}）</option></select></label><label>初始资金<input v-model.number="macroForm.initial_capital" type="number" /></label></div>
+          <div class="two"><label>开始<input v-model="macroForm.start_date" type="date" /></label><label>结束<input v-model="macroForm.end_date" type="date" /></label></div>
+          <label><input v-model="macroForm.allow_unverified_history" type="checkbox" />允许未经历史时点审计的数据进行探索性回测</label>
+          <div class="toolbar"><button @click="macroSync" :disabled="busy">① 同步原始数据</button><button @click="macroRecalculate" :disabled="busy">② 重新计算指标</button><button class="primary" @click="macroBacktest" :disabled="busy">③ 创建策略回测</button></div>
+        </div>
+        <h3>最近指标（{{ macroIndicators.length }}条）</h3>
+        <div class="table-wrap"><table><thead><tr><th>日期</th><th>总市值/GDP</th><th>建议权益仓位</th><th>历史口径</th></tr></thead><tbody>
+          <tr v-for="row in macroIndicators.slice(-30).reverse()" :key="row.date"><td>{{ row.date }}</td><td>{{ (row.x * 100).toFixed(2) }}%</td><td>{{ (row.target_weight * 100).toFixed(1) }}%</td><td>{{ row.provenance }}</td></tr>
+        </tbody></table></div>
+        <h3>历史回测</h3>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>时间</th><th>年化</th><th>最大回撤</th><th>数据来源</th><th>操作</th></tr></thead><tbody>
+          <tr v-for="r in macroRuns" :key="r.id"><td>{{ r.id }}</td><td>{{ r.start_date }}～{{ r.end_date }}</td><td>{{ (r.summary.cagr*100).toFixed(2) }}%</td><td>{{ (r.summary.max_drawdown*100).toFixed(2) }}%</td><td>{{ r.provenance }}</td><td><button @click="showMacroRun(r.id)">查看</button></td></tr>
+        </tbody></table></div>
+      </section>
+      <section v-if="page === 'macro_result'">
+        <button @click="nav('macro')">← 返回宏观策略</button>
+        <p class="hint">指数理论回测；历史数据是否具备时点可知性尚待核验。</p>
+        <div class="stats compact"><article><strong>{{ ((macroRun?.summary?.cagr || 0)*100).toFixed(2) }}%</strong>年化收益</article><article><strong>{{ ((macroRun?.summary?.max_drawdown || 0)*100).toFixed(2) }}%</strong>最大回撤</article><article><strong>{{ ((macroRun?.summary?.benchmark_cagr || 0)*100).toFixed(2) }}%</strong>买入持有年化</article><article><strong>{{ macroRun?.summary?.trade_count || 0 }}</strong>交易次数</article></div>
+        <div ref="macroChartEl" class="chart"></div>
+        <h3>逐笔成交</h3><div class="table-wrap"><table><thead><tr><th>信号日</th><th>成交日</th><th>X</th><th>方向</th><th>目标仓位</th><th>价格</th><th>数量</th><th>费用</th></tr></thead><tbody>
+          <tr v-for="(t,i) in macroTrades" :key="i"><td>{{ t.signal_date }}</td><td>{{ t.trade_date }}</td><td>{{ t.x.toFixed(4) }}</td><td>{{ t.side }}</td><td>{{ (t.target_weight*100).toFixed(1) }}%</td><td>{{ t.price.toFixed(2) }}</td><td>{{ t.quantity.toFixed(2) }}</td><td>{{ t.fee.toFixed(2) }}</td></tr>
+        </tbody></table></div>
+      </section>
       <section v-if="page === 'overview'"><div class="stats"><article><strong>{{ overview.index_count ?? '-' }}</strong>指数数量</article><article><strong>{{ overview.enabled_count ?? '-' }}</strong>启用监控</article><article><strong>{{ overview.failed_count ?? '-' }}</strong>数据源异常</article><article><strong>{{ overview.recent?.length ?? 0 }}</strong>近期信号</article></div><h3>已启用理论指数</h3><div class="table-wrap"><table><thead><tr><th>指数</th><th>代码</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in indices.filter(x => x.enabled)" :key="item.id"><td>{{ item.index_name }}</td><td>{{ item.index_code }}</td><td><span class="chip">{{ item.data_status }}</span></td><td><button @click="form.index_id = item.id; page = 'backtest'">回测</button></td></tr></tbody></table></div></section>
 
       <section v-if="page === 'indices'"><div class="stats compact"><article><strong>{{ indices.length }}</strong>已配置指数</article><article><strong>{{ indices.filter(x => x.enabled).length }}</strong>正在同步</article><article><strong>{{ indices.filter(x => x.data_status === 'ACTIVE').length }}</strong>数据正常</article><article><strong>{{ indices.filter(x => x.data_status === 'SOURCE_FAILED').length }}</strong>数据源异常</article></div><div class="toolbar section-toolbar"><select v-model="market"><option value="">全部市场</option><option value="CN">A股</option><option value="HK">港股</option></select><button @click="runAdmin('/jobs/probe-sources')">探测全部数据源</button><button @click="runAdmin('/jobs/backfill', { days: 730 })">已启用指数补采</button><button @click="runAdmin('/jobs/scan', { days: 730 })">已启用指数扫描</button><button @click="runAdmin('/jobs/deliver-alerts')">发送待发通知</button></div><div class="table-wrap"><table><thead><tr><th>指数</th><th>代码</th><th>市场</th><th>数据源</th><th>同步状态</th><th>日线/周线/信号</th><th>最后数据日</th><th>监控</th><th>异常</th><th>操作</th></tr></thead><tbody><tr v-for="item in indices.filter(x => !market || x.market === market)" :key="item.id"><td>{{ item.index_name }}</td><td>{{ item.index_code }}</td><td>{{ item.market }}</td><td>{{ item.provider }}</td><td><span class="chip" :class="{failed: item.data_status === 'SOURCE_FAILED'}">{{ item.data_status }}</span></td><td>{{ item.daily_count }} / {{ item.weekly_count }} / {{ item.signal_count }}</td><td>{{ item.last_success_date || '-' }}</td><td>{{ item.enabled ? '已启用' : '未启用' }}</td><td class="error-cell">{{ item.last_error || '-' }}</td><td><button @click="showIndex(item)">K线</button><button @click="runAdmin(`/indices/${item.id}/probe`)">探测</button><button @click="runAdmin('/jobs/backfill', { index_ids: [item.id], days: 1825 })">补采5年</button><button @click="runAdmin('/jobs/scan', { index_ids: [item.id], days: 1825 })">扫描</button><button @click="setEnabled(item)">{{ item.enabled ? '停用' : '启用' }}</button></td></tr></tbody></table></div></section>
