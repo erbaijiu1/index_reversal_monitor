@@ -31,7 +31,7 @@ pytest -q
 本项目只新增业务文件，严格以宿主 `/data/toc_service/README.md` 为基础设施规范。
 
 1. 项目放在 `/data/toc_service/index_reversal_monitor/`。
-2. 创建独立 MySQL schema `db_index_reversal`、最小权限用户；先执行 `sql/schema.sql`，再执行 `sql/backtest.sql` 和 `sql/price_center_v1.sql`。**不要在生产环境同时执行已有 schema SQL 和 ORM 自动迁移**，后续表改动用显式迁移。
+2. 创建独立 MySQL schema `db_index_reversal`、最小权限用户；先执行 `sql/schema.sql`，再执行 `sql/backtest.sql` 和 `sql/price_center_v1.sql`；启用宏观估值模块时另执行 `sql/macro_cap_gdp.sql`。**不要在生产环境同时执行已有 schema SQL 和 ORM 自动迁移**，后续表改动用显式迁移。
    如果数据库已安装过早期回测草稿表，则不要重复执行 `backtest.sql`，先执行一次 `sql/backtest_v1_1_migration.sql`；所有已存在的回测数据库升级日线信号功能时，再执行一次 `sql/backtest_v1_2_daily_signal_migration.sql`。
    已安装价格中枢 V1 表但缺少份额折算取整字段时，执行一次 `sql/price_center_v1_1_share_change.sql`。
 3. 新建 `/data/toc_service/env/index_reversal.env`，参照 `backend/.env.example`，权限 `chmod 600`。
@@ -79,6 +79,82 @@ pytest -q
 决策表只持久化真正触发状态变化的信号及其成交/过期结果，不保存逐日 `NO_ACTION` 或等待重复记录。图表所需的完整指数收盘、中枢和偏离度序列在查看结果时从原始行情即时计算，避免为每个回测任务重复存储数千条相同行情派生数据。
 
 成交与净值使用 ETF 原始日线，不用指数点位替代。现金分红计入现金，已知份额折算会同步调整策略与买入持有基准的持仓份额；当前映射为沪深300→510300、中证500→510500、科创50→588000。同步阶段会拒绝未登记公司行为导致的异常价格跳变，避免把拆分/合并误算成暴涨暴跌。基准与策略从 MA 预热完成后的同一 ETF 交易日开始，现金收益率假设为 0%。
+
+## CAP/GDP 宏观估值与逆周期仓位策略（独立模块）
+
+本分支新增 **CAP/GDP 宏观估值策略**，参考 [stock_monitor](https://github.com/erbaijiu1/stock_monitor) 中的“总市值/GDP → 目标仓位”思路，但**不共享其数据库、不调用其 API，也不依赖其服务运行**。
+
+### 模块划分与数据流
+
+```text
+上交所公开市场概貌 ─┐
+                    ├─> 独立采集/校验 ─> t_macro_cap_gdp_raw
+深交所市场概貌 ─────┤                              │
+国家统计局 GDP 数据 ─┘                              ▼
+                                      t_macro_cap_gdp_indicator
+                                                  │
+                                     CAP/GDP 与目标仓位计算
+                                                  │
+                                                  ▼
+                                   宏观仓位回测（独立于形态回测）
+                                                  │
+                                   任务 / 日净值 / 逐笔成交
+```
+
+- **数据同步**：`backend/app/macro/native_source.py`、`sync.py`，分别采集沪深交易所“股票”总市值与年度 GDP；交易日依据本项目已有的指数日线，缺少任一来源时跳过并记录错误，不拼凑数据。
+- **指标计算**：`backend/app/macro/indicator.py`，使用 `X = 沪深股票总市值（亿元）/ 上一年度 GDP（亿元）`，单独生成每日宏观估值指标及目标仓位。
+- **回测**：`backend/app/macro/backtest.py`，按指标区间动态配置指数理论权益仓位；与原有周线量价形态、价格中枢及 A/B/C/D 回测隔离。
+- **数据存储**：所有宏观数据进入 `index_reversal_monitor` 自己的数据库及 `t_macro_*` 表。可以复用服务器上的 MySQL **实例**，但独立使用 `db_index_reversal` 逻辑库，无需另建 MySQL 实例。
+
+### 仓位规则（初始参数）
+
+- 常态目标权益仓位 **40%**，最低 **20%**，最高 **100%**。
+- 当 X 低于 **0.60、0.55、0.50、0.45、0.40** 时，按几何权重逐档提高仓位（`buy_ratio=2`）。
+- 当 X 达到 **0.70、0.75、0.80、0.85、0.90** 时，分档降低目标仓位。
+- 默认按 T 日收盘确认的指标，在下一交易日开盘进行理论调仓；计入模拟手续费及滑点。
+- **注意**：本模块当前为**指数理论回测**，不是 ETF 实际可交易回测；不得将模拟成交视为 ETF 实盘收益。
+
+### 启用和操作
+
+1. 先确认本项目已同步沪深300等指数的日线；宏观同步使用所选指数的日线日期确定交易日。
+2. 在当前逻辑数据库中执行 `sql/macro_cap_gdp.sql` 创建宏观模块表。
+3. 打开前端 **“CAP/GDP宏观估值”** 页面，依次执行 **①同步原始数据 → ②重新计算指标 → ③创建策略回测**。
+4. 回测完成后查看账户净值、买入持有基准、目标仓位与成交明细；需要管理权限的操作使用现有 `X-Admin-Token`。
+
+后端 API 前缀：`/index-reversal/api/v1/macro`。
+
+| 方法 | 路径 | 功能 |
+|---|---|---|
+| POST | `/sync` | 独立采集市场总市值和年度 GDP，传 `start_date`、`end_date`、`calendar_index_id` |
+| POST | `/indicators/recalculate` | 由原始数据重算 CAP/GDP |
+| GET | `/indicators` | 查询历史指标和目标仓位 |
+| POST | `/backtests` | 创建宏观仓位理论回测 |
+| GET | `/backtests` | 查询回测历史 |
+| GET | `/backtests/{id}/equity` | 查询日级净值与仓位 |
+| GET | `/backtests/{id}/trades` | 查询逐笔模拟成交 |
+
+同步请求示例：
+
+```json
+{
+  "start_date": "2026-11-01",
+  "end_date": "2026-11-27",
+  "market": "CN-A",
+  "calendar_index_id": 1
+}
+```
+
+`calendar_index_id` 是**本项目**数据库里已同步日线的指数 ID；示例值 `1` 需根据实际数据替换。无需配置 `MACRO_CAP_GDP_SOURCE_URL`。
+
+### 数据可信度与当前限制
+
+- 历史 GDP 源可能包含**事后修订值**。当前保守跳过每年 1—2 月，3 月起才采用上一年度 GDP，但这**不等于**已经核实历史披露日期及版本。
+- 采集到的数据标记为 `RETROSPECTIVE_GDP`；未经历史时点审计，默认禁止正式回测，需要显式设置 `allow_unverified_history=true` 才能做探索性研究。
+- 尚未完成真实 MySQL、交易所历史接口及前端构建的端到端验收；数据源字段或单位变化需要先核对再使用。
+- 宏观同步目前**手动触发**，不混入原周线监控定时任务。后续如需定时同步，应使用独立任务。
+- 若要评估真实可交易收益，后续还须引入 ETF 实际行情、交易单位、分红、交易日历及数据版本校验。
+
+更详细的设计、接口与操作说明见 [docs/CAP_GDP_INTEGRATION.md](docs/CAP_GDP_INTEGRATION.md)。
 
 ## 已知实施限制
 
