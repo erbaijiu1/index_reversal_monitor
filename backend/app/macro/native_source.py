@@ -91,9 +91,9 @@ def fetch_annual_gdp() -> dict[int, float]:
     return years
 
 def reference_gdp_year(day: date) -> int:
-    """Conservative publication lag: previous-year GDP only from March 1 onward.
+    """Return previous calendar year only after conservative March 1 gate.
 
-    This is NOT a historical publication-date guarantee, and does not solve
-    historical GDP revisions. Retrospective data must be labeled accordingly.
+    Jan/Feb are skipped rather than using year-2 GDP, preserving X's exact
+    denominator definition. GDP revisions remain a point-in-time limitation.
     """
-    return day.year - (1 if day.month >= 3 else 2)
+    return day.year - 1 if day.month >= 3 else None
