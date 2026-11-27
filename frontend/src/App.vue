@@ -34,7 +34,7 @@ async function macroSync() {
   if (!auth()) return
   busy.value = true; error.value = ''
   try {
-    await request('/macro/sync', { method: 'POST', body: JSON.stringify({ start_date: macroForm.value.start_date, end_date: macroForm.value.end_date, market: 'CN-A' }) })
+    await request('/macro/sync', { method: 'POST', body: JSON.stringify({ start_date: macroForm.value.start_date, end_date: macroForm.value.end_date, market: 'CN-A', calendar_index_id: Number(macroForm.value.index_id) }) })
     await request('/macro/indicators/recalculate', { method: 'POST' })
     await loadMacro()
   } catch (e) { error.value = e.message } finally { busy.value = false }
@@ -330,7 +330,7 @@ onBeforeUnmount(() => { clearTimeout(pollTimer); chart?.dispose(); detailChart?.
 
       <section v-if="page === 'macro'">
         <h3>宏观估值指标 · 数据同步 / 指标计算 / 回测分离</h3>
-        <p class="hint">使用全A总市值÷上一年度GDP配置沪深300等指数仓位。历史GDP未验证实际公布时点，回测属于探索性研究，执行价格是指数理论价格，不代表ETF实盘收益。</p>
+        <p class="hint">独立获取沪深交易所总市值及GDP并写入本项目数据库。历史GDP未验证实际公布时点，回测属于探索性研究，执行价格是指数理论价格，不代表ETF实盘收益。</p>
         <div class="form wide">
           <div class="two"><label>交易指数<select v-model.number="macroForm.index_id"><option v-for="item in indices" :key="item.id" :value="item.id">{{ item.index_name }}（{{ item.index_code }}）</option></select></label><label>初始资金<input v-model.number="macroForm.initial_capital" type="number" /></label></div>
           <div class="two"><label>开始<input v-model="macroForm.start_date" type="date" /></label><label>结束<input v-model="macroForm.end_date" type="date" /></label></div>
