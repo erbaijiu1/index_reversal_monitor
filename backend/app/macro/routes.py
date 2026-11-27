@@ -1,5 +1,4 @@
 """Macro dataset synchronization, indicator calculation and independent backtests."""
-import os
 from datetime import date
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -12,7 +11,7 @@ from ..core.models import Daily, Index
 from .backtest import IndicatorPoint, MarketBar, run_allocation_backtest
 from .indicator import AllocationConfig
 from .models import MacroBacktestDaily, MacroBacktestRun, MacroBacktestTrade, MacroIndicatorDaily, MacroRawDaily
-from .sync import fetch_upstream, sync_raw, calculate_indicators
+from .sync import sync_native, calculate_indicators
 
 router = APIRouter(prefix="/index-reversal/api/v1/macro", tags=["macro-cap-gdp"])
 
@@ -24,6 +23,7 @@ class SyncRequest(BaseModel):
     start_date: date
     end_date: date
     market: str = "CN-A"
+    calendar_index_id: int = Field(..., gt=0, description="本项目已同步日线的指数ID，作为交易日历")
 
 class BacktestRequest(BaseModel):
     index_id: int
@@ -45,18 +45,19 @@ class BacktestRequest(BaseModel):
 def synchronize(p: SyncRequest, db: Session = Depends(get_db)):
     if p.end_date < p.start_date:
         raise HTTPException(400, "end_date must be >= start_date")
-    url = os.environ.get("MACRO_CAP_GDP_SOURCE_URL", "")
-    if not url:
-        raise HTTPException(409, "Set MACRO_CAP_GDP_SOURCE_URL to stock_monitor's /stock/api/cap-gdp/series endpoint")
+    if not db.get(Index, p.calendar_index_id):
+        raise HTTPException(404, "calendar index not found")
     try:
-        points = fetch_upstream(p.start_date, p.end_date, url, p.market)
-        stats = sync_raw(db, points, market=p.market, source=url)
+        stats = sync_native(db, p.start_date, p.end_date, p.calendar_index_id, p.market)
         db.commit()
-        return {**stats, "source_count": len(points), "market": p.market,
-                "provenance": "UPSTREAM_SNAPSHOT", "next_step": "POST /macro/indicators/recalculate"}
-    except (ValueError, Exception) as exc:
+        return {**stats, "market": p.market, "provenance": "RETROSPECTIVE_GDP",
+                "next_step": "POST /macro/indicators/recalculate"}
+    except ValueError as exc:
         db.rollback()
-        raise HTTPException(502, f"macro source sync failed: {exc}") from exc
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(502, f"native market data sync failed: {exc}") from exc
 
 @router.post("/indicators/recalculate", dependencies=[Depends(admin)])
 def recalculate(market: str = "CN-A", db: Session = Depends(get_db)):
