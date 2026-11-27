@@ -37,7 +37,7 @@ def test_validation():
 
 def test_native_source_gdp_reference_lag():
     from app.macro.native_source import reference_gdp_year
-    assert reference_gdp_year(date(2026, 1, 20)) == 2024
+    assert reference_gdp_year(date(2026, 1, 20)) is None
     assert reference_gdp_year(date(2026, 3, 1)) == 2025
 
 def test_native_szse_source_normalizes_units(monkeypatch):
