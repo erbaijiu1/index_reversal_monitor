@@ -34,3 +34,32 @@ def test_validation():
         cap_gdp_ratio(100,0)
     with pytest.raises(ValueError):
         target_weight(.5,AllocationConfig(floor=.7,neutral=.4))
+
+def test_native_source_gdp_reference_lag():
+    from app.macro.native_source import reference_gdp_year
+    assert reference_gdp_year(date(2026, 1, 20)) == 2024
+    assert reference_gdp_year(date(2026, 3, 1)) == 2025
+
+def test_native_szse_source_normalizes_units(monkeypatch):
+    import pandas as pd
+    from app.macro import native_source
+    class MockAk:
+        @staticmethod
+        def stock_szse_summary(date):
+            return pd.DataFrame([
+                {"证券类别": "债券", "总市值(亿元)": 999},
+                {"证券类别": "股票", "总市值(亿元)": 1234.5},
+            ])
+    monkeypatch.setattr(native_source, "ak", MockAk)
+    assert native_source.fetch_szse_cap(date(2026, 11, 20)) == 1234.5
+
+def test_native_szse_rejects_unknown_units(monkeypatch):
+    import pandas as pd
+    from app.macro import native_source
+    class MockAk:
+        @staticmethod
+        def stock_szse_summary(date):
+            return pd.DataFrame([{"证券类别": "股票", "总市值": 1234.5}])
+    monkeypatch.setattr(native_source, "ak", MockAk)
+    with pytest.raises(ValueError):
+        native_source.fetch_szse_cap(date(2026, 11, 20))
