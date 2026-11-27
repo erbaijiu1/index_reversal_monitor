@@ -31,7 +31,7 @@ def sync_native(db: Session, start: date, end: date, index_id: int, market: str 
         gdp = gdp_by_year.get(year)
         if not gdp:
             stats["skipped"] += 1
-            stats["errors"].append({"date": day.isoformat(), "reason": f"missing GDP {year}"})
+            stats["errors"].append({"date": day.isoformat(), "reason": f"GDP for previous year unavailable under conservative release gate (year={year})"})
             continue
         try:
             sse = fetch_sse_cap(day)
