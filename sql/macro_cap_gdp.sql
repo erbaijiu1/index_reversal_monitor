@@ -32,11 +32,22 @@ CREATE TABLE IF NOT EXISTS t_macro_backtest_run (
 CREATE TABLE IF NOT EXISTS t_macro_backtest_daily (
  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
  run_id INT NOT NULL, trade_date DATE NOT NULL,
- x DECIMAL(16,8) NOT NULL, target_weight DECIMAL(12,8) NOT NULL,
+ x DECIMAL(16,8) NULL, target_weight DECIMAL(12,8) NOT NULL,
  actual_weight DECIMAL(12,8) NOT NULL, cash DECIMAL(22,6) NOT NULL,
  holding DECIMAL(22,6) NOT NULL, nav DECIMAL(22,6) NOT NULL,
  benchmark_nav DECIMAL(22,6) NOT NULL,
  fee DECIMAL(20,6) NOT NULL DEFAULT 0, action VARCHAR(20) NOT NULL DEFAULT 'HOLD',
  UNIQUE KEY uq_macro_bt_run_day (run_id,trade_date),
  CONSTRAINT fk_macro_bt_daily_run FOREIGN KEY (run_id) REFERENCES t_macro_backtest_run(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS t_macro_backtest_trade (
+ id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ run_id INT NOT NULL, signal_date DATE NOT NULL, trade_date DATE NOT NULL,
+ x DECIMAL(16,8) NOT NULL, side VARCHAR(8) NOT NULL,
+ target_weight DECIMAL(12,8) NOT NULL,
+ price DECIMAL(20,6) NOT NULL, quantity DECIMAL(24,8) NOT NULL,
+ fee DECIMAL(20,6) NOT NULL,
+ KEY idx_macro_trade_run (run_id,trade_date),
+ CONSTRAINT fk_macro_trade_run FOREIGN KEY (run_id) REFERENCES t_macro_backtest_run(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
